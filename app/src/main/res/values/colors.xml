@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Базовые цвета (заменяются на динамические на Android 12+) -->
+    <color name="md_theme_primary">#006C50</color>
+    <color name="md_theme_onPrimary">#FFFFFF</color>
+    <color name="md_theme_primaryContainer">#89F8C9</color>
+    <color name="md_theme_onPrimaryContainer">#002116</color>
+    <color name="md_theme_secondary">#4A6356</color>
+    <color name="md_theme_onSecondary">#FFFFFF</color>
+    <color name="md_theme_background">#000000</color>
+    <color name="md_theme_onBackground">#E3E3E3</color>
+    <color name="md_theme_surface">#000000</color>
+    <color name="md_theme_onSurface">#E3E3E3</color>
+</resources>
