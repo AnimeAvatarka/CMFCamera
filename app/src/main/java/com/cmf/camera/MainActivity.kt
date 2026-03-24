@@ -2,6 +2,8 @@ package com.cmf.camera
 
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -14,22 +16,29 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
@@ -46,22 +55,24 @@ class MainActivity : ComponentActivity() {
     private var preview: Preview? = null
     private var camera: Camera? = null
     
-    // State для переключения камеры (вызывает рекомпозицию)
     private var isFrontCamera by mutableStateOf(false)
-    
-    // State для принудительного обновления превью
     private var refreshTrigger by mutableStateOf(0)
+    private var lastPhotoBitmap by mutableStateOf<Bitmap?>(null)
+    
+    // Состояния UI
+    private var selectedMode by mutableStateOf("Photo")
+    private var zoomScale by mutableStateOf(1f)
+    private var exposureCompensation by mutableStateOf(0)
     
     private val cameraExecutor: ExecutorService by lazy { Executors.newSingleThreadExecutor() }
     
     private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        Log.d(TAG, "Permission result: $isGranted")
-        if (isGranted) {
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[android.Manifest.permission.CAMERA] == true) {
             startCamera()
         } else {
-            Toast.makeText(this, "Camera permission required", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Нужно разрешение камеры", Toast.LENGTH_SHORT).show()
             finish()
         }
     }
@@ -69,113 +80,191 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        Log.d(TAG, "=== onCreate START ===")
-        
-        // Dynamic Colors для Android 12+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             setTheme(com.google.android.material.R.style.Theme_Material3_DynamicColors_DayNight)
         }
         
-        // Запрашиваем разрешение
-        when {
-            ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                Log.d(TAG, "Permission already granted")
-                startCamera()
-            }
-            else -> {
-                Log.d(TAG, "Requesting permission")
-                requestPermissionLauncher.launch(android.Manifest.permission.CAMERA)
-            }
+        val permissions = arrayOf(android.Manifest.permission.CAMERA)
+        val allGranted = permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+        
+        if (allGranted) {
+            startCamera()
+        } else {
+            requestPermissionLauncher.launch(permissions)
         }
         
         setContent {
-            Log.d(TAG, "setContent called")
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color.Black
                 ) {
-                    CameraScreen(
+                    PixelCameraUI(
                         onCaptureClick = { capturePhoto() },
-                        onSwitchCameraClick = { switchCamera() }
+                        onSwitchCameraClick = { switchCamera() },
+                        onModeSelected = { selectedMode = it },
+                        onZoomSelected = { zoomScale = it },
+                        selectedMode = selectedMode,
+                        zoomScale = zoomScale,
+                        lastPhotoBitmap = lastPhotoBitmap
                     )
                 }
             }
         }
-        
-        Log.d(TAG, "=== onCreate END ===")
     }
 
     @Composable
-    fun CameraScreen(
+    fun PixelCameraUI(
         onCaptureClick: () -> Unit,
-        onSwitchCameraClick: () -> Unit
+        onSwitchCameraClick: () -> Unit,
+        onModeSelected: (String) -> Unit,
+        onZoomSelected: (Float) -> Unit,
+        selectedMode: String,
+        zoomScale: Float,
+        lastPhotoBitmap: Bitmap?
     ) {
-        Log.d(TAG, "CameraScreen composable called")
-        
         Box(modifier = Modifier.fillMaxSize()) {
             // Превью камеры
-            CameraPreview(
-                modifier = Modifier.fillMaxSize(),
-                onSwitchCameraClick = onSwitchCameraClick
-            )
+            CameraPreview(modifier = Modifier.fillMaxSize())
             
-            // UI элементы поверх превью
+            // Верхняя панель (Настройки, Вспышка)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .align(Alignment.TopCenter),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(onClick = { /* Settings */ }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                }
+                IconButton(onClick = { /* Flash */ }) {
+                    Icon(Icons.Default.FlashOn, contentDescription = "Flash", tint = Color.White)
+                }
+            }
+            
+            // Левая панель (Экспозиция)
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.SpaceBetween
+                    .fillMaxHeight()
+                    .padding(start = 8.dp)
+                    .align(Alignment.CenterStart),
+                verticalArrangement = Arrangement.Center
             ) {
-                // Верхняя панель
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Icon(Icons.Default.BrightnessHigh, contentDescription = "Exposure", tint = Color.White, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .height(150.dp)
+                        .background(Color.White.copy(alpha = 0.3f), RoundedCornerShape(2.dp))
                 ) {
-                    IconButton(onClick = { 
-                        Log.d(TAG, "Settings clicked")
-                        Toast.makeText(this@MainActivity, "Settings", Toast.LENGTH_SHORT).show()
-                    }) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = Color.White
-                        )
-                    }
-                    
-                    // Кнопка переключения камеры
-                    IconButton(onClick = { 
-                        Log.d(TAG, "Switch camera clicked")
-                        onSwitchCameraClick()
-                    }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Switch camera",
-                            tint = Color.White
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(30.dp)
+                            .align(Alignment.Center)
+                            .background(Color.White, RoundedCornerShape(2.dp))
+                    )
+                }
+            }
+            
+            // Правая панель (Галерея)
+            Box(
+                modifier = Modifier
+                    .size(50.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .background(Color.White.copy(alpha = 0.3f))
+                    .clickable { /* Open Gallery */ }
+            ) {
+                if (lastPhotoBitmap != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = lastPhotoBitmap!!.asImageBitmap(),
+                        contentDescription = "Last photo",
+                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))
+                    )
+                } else {
+                    Box(modifier = Modifier.fillMaxSize().background(Color.Gray))
+                }
+            }
+            
+            // Нижняя панель управления
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Зум
+                Row(
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    listOf(0.5f, 1f, 2f, 5f).forEach { zoom ->
+                        Text(
+                            text = "${zoom}x",
+                            color = if (zoomScale == zoom) Color.White else Color.White.copy(alpha = 0.5f),
+                            fontWeight = if (zoomScale == zoom) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.clickable { onZoomSelected(zoom) }
                         )
                     }
                 }
                 
-                // Кнопка спуска
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                // Кнопка спуска и переключения
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 32.dp),
-                    horizontalArrangement = Arrangement.Center
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Переключение камеры
                     Box(
-                        contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(80.dp)
-                            .background(Color.White, CircleShape)
+                            .size(48.dp)
+                            .border(2.dp, Color.White, CircleShape)
+                            .clip(CircleShape)
+                            .clickable { onSwitchCameraClick() },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .background(Color.Black, CircleShape)
+                        Icon(Icons.Default.Refresh, contentDescription = "Switch", tint = Color.White, modifier = Modifier.size(28.dp))
+                    }
+                    
+                    // Кнопка спуска
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .border(4.dp, Color.White, CircleShape)
+                            .padding(4.dp)
+                            .background(Color.White, CircleShape)
+                            .clickable { onCaptureClick() }
+                    )
+                    
+                    // Пустое место для симметрии
+                    Spacer(modifier = Modifier.size(48.dp))
+                }
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                // Режимы съёмки
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    contentPadding = PaddingValues(horizontal = 32.dp)
+                ) {
+                    items(listOf("Portrait", "Photo", "Night Sight", "Panorama")) { mode ->
+                        Text(
+                            text = mode,
+                            color = if (selectedMode == mode) Color.White else Color.White.copy(alpha = 0.5f),
+                            fontSize = 14.sp,
+                            fontWeight = if (selectedMode == mode) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.clickable { onModeSelected(mode) }
                         )
                     }
                 }
@@ -184,12 +273,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun CameraPreview(
-        modifier: Modifier = Modifier,
-        onSwitchCameraClick: () -> Unit
-    ) {
-        Log.d(TAG, "CameraPreview composable called")
-        
+    fun CameraPreview(modifier: Modifier = Modifier) {
         val context = LocalContext.current
         val lifecycleOwner = LocalLifecycleOwner.current
         val provider = cameraProvider
@@ -198,46 +282,28 @@ class MainActivity : ComponentActivity() {
         
         AndroidView(
             factory = { ctx ->
-                Log.d(TAG, "PreviewView FACTORY called")
                 PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     scaleType = PreviewView.ScaleType.FILL_CENTER
-                    Log.d(TAG, "PreviewView created")
                 }
             },
             modifier = modifier,
             update = { previewView ->
-                Log.d(TAG, "PreviewView UPDATE called, provider=${provider != null}, refresh=$currentRefresh")
                 if (provider != null) {
-                    Log.d(TAG, "Binding use cases, isFront=$currentIsFront")
                     bindCameraUseCases(previewView, lifecycleOwner, provider, currentIsFront)
-                } else {
-                    Log.d(TAG, "Provider not ready yet")
                 }
             }
         )
     }
 
     private fun startCamera() {
-        Log.d(TAG, "startCamera() called")
-        
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        
         cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                Log.d(TAG, "CameraProvider READY: $cameraProvider")
-                
-                // Обновляем UI
-                runOnUiThread {
-                    Log.d(TAG, "Refreshing UI after provider ready")
-                    refreshTrigger++
-                }
+                runOnUiThread { refreshTrigger++ }
             } catch (e: Exception) {
                 Log.e(TAG, "Camera init FAILED", e)
-                runOnUiThread {
-                    Toast.makeText(this, "Camera init failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -248,33 +314,25 @@ class MainActivity : ComponentActivity() {
         cameraProvider: ProcessCameraProvider,
         isFront: Boolean
     ) {
-        Log.d(TAG, "bindCameraUseCases() START, isFront=$isFront")
-        
         try {
-            // Превью
             preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
-                Log.d(TAG, "Preview surface provider set")
             }
             
-            // Съёмка
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .setTargetRotation(previewView.display?.rotation ?: android.view.Surface.ROTATION_0)
+                .setJpegQuality(100)
                 .build()
             
-            // Выбор камеры
             val cameraSelector = if (isFront) {
                 CameraSelector.DEFAULT_FRONT_CAMERA
             } else {
                 CameraSelector.DEFAULT_BACK_CAMERA
             }
             
-            // Отвязываем старое
             cameraProvider.unbindAll()
-            Log.d(TAG, "Previous use cases unbound")
             
-            // Привязываем новое
             camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 cameraSelector,
@@ -282,86 +340,72 @@ class MainActivity : ComponentActivity() {
                 imageCapture
             )
             
-            Log.d(TAG, "=== Camera BOUND SUCCESSFULLY ===")
+            Log.d(TAG, "Camera BOUND SUCCESSFULLY")
             
         } catch (e: Exception) {
             Log.e(TAG, "bindCameraUseCases FAILED", e)
-            runOnUiThread {
-                Toast.makeText(this, "Camera bind failed: ${e.message}", Toast.LENGTH_LONG).show()
-            }
         }
     }
 
     private fun switchCamera() {
-        Log.d(TAG, "switchCamera() called")
-        
-        // Меняем состояние (это вызовет рекомпозицию CameraPreview)
         isFrontCamera = !isFrontCamera
         refreshTrigger++
-        
-        Log.d(TAG, "isFrontCamera: $isFrontCamera, refreshTrigger: $refreshTrigger")
-        
-        Toast.makeText(
-            this, 
-            if (isFrontCamera) "Front camera" else "Back camera", 
-            Toast.LENGTH_SHORT
-        ).show()
     }
 
     private fun capturePhoto() {
-        Log.d(TAG, "capturePhoto() called")
+        val imageCapture = imageCapture ?: return
         
-        val imageCapture = imageCapture ?: run {
-            Log.e(TAG, "imageCapture is null")
-            Toast.makeText(this, "Camera not ready", Toast.LENGTH_SHORT).show()
-            return
+        // СОХРАНЕНИЕ В ГАЛЕРЕЮ (MediaStore)
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()))
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CMF Camera")
+            }
         }
         
-        // Создаём файл для сохранения
-        val photoFile = createImageFile()
-        Log.d(TAG, "Photo file: ${photoFile.absolutePath}")
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(
+            contentResolver,
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            contentValues
+        ).build()
         
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-        
-        Log.d(TAG, "Taking picture...")
         imageCapture.takePicture(
             outputOptions,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    Log.d(TAG, "Photo saved: ${output.savedUri}")
+                    Log.d(TAG, "Photo saved to Gallery: ${output.savedUri}")
+                    
+                    // Загружаем превью
+                    output.savedUri?.let { uri ->
+                        try {
+                            val inputStream = contentResolver.openInputStream(uri)
+                            val bitmap = BitmapFactory.decodeStream(inputStream)
+                            inputStream?.close()
+                            lastPhotoBitmap = bitmap
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to load preview", e)
+                        }
+                    }
+                    
                     runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity, 
-                            "Photo saved to ${photoFile.name}", 
-                            Toast.LENGTH_LONG
-                        ).show()
+                        Toast.makeText(this@MainActivity, "Фото сохранено в галерею!", Toast.LENGTH_SHORT).show()
                     }
                 }
                 
                 override fun onError(exception: ImageCaptureException) {
                     Log.e(TAG, "Photo capture FAILED", exception)
                     runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity, 
-                            "Capture failed: ${exception.message}", 
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        Toast.makeText(this@MainActivity, "Ошибка: ${exception.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
         )
     }
 
-    private fun createImageFile(): File {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val storageDir = getExternalFilesDir(null)
-        return File(storageDir, "JPEG_${timeStamp}.jpg")
-    }
-
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "onDestroy() called")
         cameraExecutor.shutdown()
     }
 }
